@@ -160,6 +160,34 @@
       rel.length ? null : h("text", { x: cx, y: cy + 60, textAnchor: "middle", className: "hm-elabel" }, "no collections"));
   }
 
+  // ---------- drill-down: a level exploded into its individual facts as leaf nodes ----------
+  function FactsView(props) {
+    var facts = props.facts, level = props.level, onPick = props.onPick, sel = props.selected, color = props.color;
+    var CAP = 44;
+    var shown = facts.slice(0, CAP);
+    var cx = VBW / 2, cy = VBH / 2, R = Math.min(VBW, VBH) * 0.36;
+    function place(i) {
+      var a = (i / Math.max(shown.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      var rr = R * (i % 2 ? 1 : 0.82);
+      return { x: cx + rr * Math.cos(a), y: cy + rr * Math.sin(a) };
+    }
+    var lines = shown.map(function (f, i) { var p = place(i);
+      return h("path", { key: "fl" + i, className: "hm-edge", d: "M" + cx + "," + cy + " L" + p.x + "," + p.y, strokeWidth: 1, style: { opacity: 0.22, cursor: "default" } }); });
+    var nodes = shown.map(function (f, i) { var p = place(i);
+      var isSel = sel && sel.id === f.id;
+      return h("g", { key: f.id || i, className: "hm-node" + (isSel ? " sel" : ""), transform: "translate(" + p.x + "," + p.y + ")",
+          style: { cursor: "pointer" }, onClick: function () { onPick(f); } },
+        h("circle", { r: isSel ? 9 : 6, style: { fill: color, stroke: color, strokeWidth: isSel ? 2 : 1 } }),
+        h("title", null, f.content)); });
+    return h("svg", { viewBox: "0 0 " + VBW + " " + VBH, height: 320, role: "img" },
+      lines, nodes,
+      h("g", { transform: "translate(" + cx + "," + cy + ")" },
+        h("circle", { r: 26, style: { fill: "var(--color-muted)", stroke: color, strokeWidth: 2 } }),
+        h("text", { textAnchor: "middle", dy: -2, fontSize: 12 }, level),
+        h("text", { textAnchor: "middle", dy: 13, fontSize: 11, className: "hm-elabel" }, fmt(facts.length))),
+      facts.length > CAP ? h("text", { x: cx, y: VBH - 8, textAnchor: "middle", className: "hm-elabel" }, "showing " + CAP + " of " + facts.length + " · full list in Fact Explorer") : null);
+  }
+
   // ---------- small card ----------
   function Card(title, sub, body) {
     var C = SDK.components;
@@ -183,7 +211,8 @@
     var observer = useState(""), setObserver = observer[1]; observer = observer[0];
     var target = useState(""), setTarget = target[1]; target = target[0];
     var busy = useState(false), setBusy = busy[1]; busy = busy[0];
-    var drill = useState(null), setDrill = drill[1]; drill = drill[0]; // null | selected edge/collection
+    var drill = useState(null), setDrill = drill[1]; drill = drill[0]; // null | {kind:peer|edge|level, ...}
+    var fd = useState(null), setFd = fd[1]; fd = fd[0]; // selected fact detail
 
     // overview + live poll
     useEffect(function () {
@@ -271,45 +300,55 @@
     }));
 
     var allLevels = function () { return new Set(levelNames); };
-    var activeLevel = (levels && levels.size === 1) ? Array.from(levels)[0] : null;
     var isEdge = drill && drill.kind === "edge";
     var isPeer = drill && drill.kind === "peer";
-    function goTop() { setDrill(null); setLevels(allLevels()); setFilter({}); }
-    function goPeer(p) { setDrill({ kind: "peer", peer: p }); setFilter({ observed: p }); setLevels(allLevels()); }
-    function crumbLink(label, fn) { return h("a", { style: { cursor: "pointer", color: "var(--color-primary)", marginLeft: 6 }, onClick: fn }, label); }
-    function crumbTxt(label) { return h("span", { className: "hm-muted hm-mono", style: { marginLeft: 6 } }, label); }
+    var isLevel = drill && drill.kind === "level";
+    function goTop() { setDrill(null); setLevels(allLevels()); setFilter({}); setFd(null); }
+    function goPeer(p) { setDrill({ kind: "peer", peer: p }); setFilter({ observed: p }); setLevels(allLevels()); setFd(null); }
+    function goEdge(d) { setDrill({ kind: "edge", from: d.from, observer: d.observer, observed: d.observed, levels: d.levels, total: d.total }); setFilter({ observer: d.observer, observed: d.observed }); setLevels(allLevels()); setFd(null); }
+    function goLevel(d, k) { setDrill({ kind: "level", from: d.from, observer: d.observer, observed: d.observed, levels: d.levels, level: k }); setFilter({ observer: d.observer, observed: d.observed }); setLevels(new Set([k])); setFd(null); }
+    function crumbLink(key, label, fn) { return h("a", { key: key, style: { cursor: "pointer", color: "var(--color-primary)", marginLeft: 6 }, onClick: fn }, label); }
+    function crumbTxt(key, label) { return h("span", { key: key, className: "hm-muted hm-mono", style: { marginLeft: 6 } }, label); }
 
     var crumb = h("div", { className: "hm-row", style: { marginBottom: 6, fontSize: 12 } }, [
       h("a", { key: "top", style: { cursor: "pointer", color: drill ? "var(--color-primary)" : "var(--color-muted-foreground)" }, onClick: goTop }, "All peers"),
-      isPeer ? crumbTxt("›  " + drill.peer) : null,
-      (isEdge && drill.from) ? h("span", { key: "f" }, crumbTxt("›"), crumbLink(drill.from, function () { goPeer(drill.from); })) : null,
-      isEdge ? crumbTxt("›  " + drill.observer + " → " + drill.observed) : null,
-      (isEdge && activeLevel) ? crumbTxt("›  " + activeLevel) : null,
-      drill ? crumbLink("← back", function () {
-        if (isEdge && drill.from) { goPeer(drill.from); } else { goTop(); }
+      isPeer ? crumbTxt("p", "›  " + drill.peer) : null,
+      ((isEdge || isLevel) && drill.from) ? crumbLink("from", "›  " + drill.from, function () { goPeer(drill.from); }) : null,
+      (isEdge || isLevel) ? crumbLink("col", "›  " + drill.observer + " → " + drill.observed, function () { goEdge(drill); }) : null,
+      isLevel ? crumbTxt("lv", "›  " + drill.level) : null,
+      (isLevel && fd) ? crumbTxt("fx", "›  fact") : null,
+      drill ? crumbLink("back", "← back", function () {
+        if (isLevel) { goEdge(drill); } else if (isEdge && drill.from) { goPeer(drill.from); } else { goTop(); }
       }) : null,
     ]);
 
-    var graphInner = isEdge
-      ? h(LevelView, { edge: drill, names: levelNames, active: activeLevel,
-          onPick: function (k) { setLevels(function (s) { return (s && s.size === 1 && s.has(k)) ? allLevels() : new Set([k]); }); } })
-      : isPeer
-        ? h(PeerFocus, { peer: drill.peer, edges: ov.edges,
-            onEdge: function (e) { setDrill({ kind: "edge", from: drill.peer, observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); setFilter({ observer: e.observer, observed: e.observed }); setLevels(allLevels()); } })
-        : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
-            onNode: function (id) { goPeer(id); },
-            onEdge: function (e) { setDrill({ kind: "edge", observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); setFilter({ observer: e.observer, observed: e.observed }); setLevels(allLevels()); } });
+    var levelFacts = facts.items.filter(function (c) { return isLevel && (c.level || "explicit") === drill.level; });
+    var graphInner = isLevel
+      ? h(FactsView, { facts: levelFacts, level: drill.level, selected: fd, color: levelColor(drill.level, levelNames.indexOf(drill.level)), onPick: function (f) { setFd(f); } })
+      : isEdge
+        ? h(LevelView, { edge: drill, names: levelNames, active: null, onPick: function (k) { goLevel(drill, k); } })
+        : isPeer
+          ? h(PeerFocus, { peer: drill.peer, edges: ov.edges, onEdge: function (e) { goEdge({ from: drill.peer, observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); } })
+          : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
+              onNode: function (id) { goPeer(id); },
+              onEdge: function (e) { goEdge({ observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); } });
 
-    var subtitle = isEdge ? "  · collection → levels" : isPeer ? "  · peer focus · its collections" : "  · observer → observed, weighted by facts";
-    var hint = isEdge ? "Click a level to filter the facts below · back to zoom out"
-      : isPeer ? "Click a collection to open its levels · click the peer crumb or back to zoom out"
-      : "Drag nodes · click a node to explode its collections · click an edge to drill straight to levels";
+    var subtitle = isLevel ? "  · facts in this level" : isEdge ? "  · collection → levels" : isPeer ? "  · peer focus · its collections" : "  · observer → observed, weighted by facts";
+    var hint = isLevel ? "Click a fact node to read it · back for the level buckets"
+      : isEdge ? "Click a level to explode it into its facts · back to zoom out"
+      : isPeer ? "Click a collection to open its levels · crumb or back to zoom out"
+      : "Drag nodes · click a node to explode its collections · click an edge to drill to levels";
+    var detail = (isLevel && fd) ? h("div", { style: { marginTop: 10, padding: "10px 12px", border: "1px solid var(--color-border)", borderRadius: 10, background: "var(--color-muted)" } },
+      h("div", { className: "hm-mono", style: { fontSize: 11, color: "var(--color-muted-foreground)", marginBottom: 4 } },
+        fd.observer_id + " → " + fd.observed_id + " · " + (fd.level || "explicit") + (fd.created_at ? " · " + String(fd.created_at).slice(0, 10) : "")),
+      h("div", { style: { fontSize: 13, lineHeight: 1.5 } }, fd.content),
+      fd.session_id ? h("div", { className: "hm-mono", style: { fontSize: 10, color: "var(--color-muted-foreground)", marginTop: 6 } }, "session " + fd.session_id) : null) : null;
     var graphCard = h(C.Card, { className: "hm-graph" },
       drill ? null : legend,
       h(C.CardHeader, { style: { paddingBottom: 6 } }, h(C.CardTitle, { style: hdr() }, "Theory-of-Mind Graph",
         h("span", { className: "hm-muted", style: sub() }, subtitle))),
       h(C.CardContent, null, crumb, graphInner,
-        h("p", { className: "hm-muted", style: { fontSize: 12, margin: "4px 0 0" } }, hint)));
+        h("p", { className: "hm-muted", style: { fontSize: 12, margin: "4px 0 0" } }, hint), detail));
 
     // fact explorer
     var visibleFacts = facts.items.filter(function (c) { return !levels || levels.has(c.level || "explicit"); });
