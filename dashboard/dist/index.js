@@ -123,6 +123,43 @@
         h("text", { textAnchor: "middle", dy: 11, fontSize: 11, className: "hm-mono" }, "→ " + edge.observed)));
   }
 
+  // ---------- drill-down: a peer exploded into the collections it's part of ----------
+  function PeerFocus(props) {
+    var peer = props.peer, edges = props.edges, onEdge = props.onEdge;
+    var rel = edges.filter(function (e) { return e.observer === peer || e.observed === peer; });
+    var cx = VBW / 2, cy = VBH / 2, R = Math.min(VBW, VBH) * 0.33;
+    var maxc = Math.max.apply(null, rel.map(function (e) { return e.total; }).concat([1]));
+    var spokes = rel.map(function (e, i) {
+      var a = (i / Math.max(rel.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      var outgoing = e.observer === peer; // peer observes the other endpoint
+      return { e: e, other: outgoing ? e.observed : e.observer, outgoing: outgoing,
+               x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), i: i };
+    });
+    var edgeEls = spokes.map(function (s) {
+      var w = 1.3 + 5 * (s.e.total / maxc);
+      var d = s.outgoing ? ("M" + cx + "," + cy + " L" + s.x + "," + s.y) : ("M" + s.x + "," + s.y + " L" + cx + "," + cy);
+      return h("path", { key: "s" + s.i, className: "hm-edge", d: d, strokeWidth: w, markerEnd: "url(#hm-arrow)",
+        style: { cursor: "pointer" }, onClick: function () { onEdge(s.e); } });
+    });
+    var nodeEls = spokes.map(function (s) {
+      var r = 15 + 15 * Math.sqrt(s.e.total / maxc);
+      var isSelf = s.other === peer;
+      return h("g", { key: s.i, className: "hm-node", transform: "translate(" + s.x + "," + s.y + ")",
+          style: { cursor: "pointer" }, onClick: function () { onEdge(s.e); } },
+        h("circle", { r: r }),
+        h("text", { textAnchor: "middle", dy: -1, fontSize: 11 }, isSelf ? "self" : s.other),
+        h("text", { textAnchor: "middle", dy: 13, fontSize: 10, className: "hm-elabel" }, (s.outgoing ? "→ " : "← ") + fmt(s.e.total)));
+    });
+    return h("svg", { viewBox: "0 0 " + VBW + " " + VBH, height: 320, role: "img" },
+      h("defs", null, h("marker", { id: "hm-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
+        h("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--color-primary)", opacity: 0.7 }))),
+      edgeEls, nodeEls,
+      h("g", { transform: "translate(" + cx + "," + cy + ")" },
+        h("circle", { r: 30, style: { fill: "color-mix(in srgb, var(--color-primary) 22%, var(--color-muted))", stroke: "var(--color-primary)", strokeWidth: 2 } }),
+        h("text", { textAnchor: "middle", dy: 4, fontSize: 13, className: "hm-mono" }, peer)),
+      rel.length ? null : h("text", { x: cx, y: cy + 60, textAnchor: "middle", className: "hm-elabel" }, "no collections"));
+  }
+
   // ---------- small card ----------
   function Card(title, sub, body) {
     var C = SDK.components;
@@ -233,28 +270,46 @@
         h("i", { className: "hm-sw", style: { background: levelColor(lv, i) } }), lv, " ", h("span", { className: "hm-mono" }, fmt(ov.levels[lv])));
     }));
 
+    var allLevels = function () { return new Set(levelNames); };
     var activeLevel = (levels && levels.size === 1) ? Array.from(levels)[0] : null;
-    var crumb = h("div", { className: "hm-row", style: { marginBottom: 6, fontSize: 12 } },
-      h("a", { style: { cursor: "pointer", color: drill ? "var(--color-primary)" : "var(--color-muted-foreground)" },
-          onClick: function () { setDrill(null); setLevels(new Set(levelNames)); setFilter({}); } }, "All peers"),
-      drill ? h("span", { className: "hm-muted hm-mono", style: { marginLeft: 8 } }, "›  " + drill.observer + " → " + drill.observed) : null,
-      drill && activeLevel ? h("span", { className: "hm-muted hm-mono", style: { marginLeft: 6 } }, "›  " + activeLevel) : null,
-      drill ? h("a", { style: { cursor: "pointer", marginLeft: 12, color: "var(--color-primary)" },
-          onClick: function () { setDrill(null); setLevels(new Set(levelNames)); } }, "← back") : null);
-    var graphInner = drill
+    var isEdge = drill && drill.kind === "edge";
+    var isPeer = drill && drill.kind === "peer";
+    function goTop() { setDrill(null); setLevels(allLevels()); setFilter({}); }
+    function goPeer(p) { setDrill({ kind: "peer", peer: p }); setFilter({ observed: p }); setLevels(allLevels()); }
+    function crumbLink(label, fn) { return h("a", { style: { cursor: "pointer", color: "var(--color-primary)", marginLeft: 6 }, onClick: fn }, label); }
+    function crumbTxt(label) { return h("span", { className: "hm-muted hm-mono", style: { marginLeft: 6 } }, label); }
+
+    var crumb = h("div", { className: "hm-row", style: { marginBottom: 6, fontSize: 12 } }, [
+      h("a", { key: "top", style: { cursor: "pointer", color: drill ? "var(--color-primary)" : "var(--color-muted-foreground)" }, onClick: goTop }, "All peers"),
+      isPeer ? crumbTxt("›  " + drill.peer) : null,
+      (isEdge && drill.from) ? h("span", { key: "f" }, crumbTxt("›"), crumbLink(drill.from, function () { goPeer(drill.from); })) : null,
+      isEdge ? crumbTxt("›  " + drill.observer + " → " + drill.observed) : null,
+      (isEdge && activeLevel) ? crumbTxt("›  " + activeLevel) : null,
+      drill ? crumbLink("← back", function () {
+        if (isEdge && drill.from) { goPeer(drill.from); } else { goTop(); }
+      }) : null,
+    ]);
+
+    var graphInner = isEdge
       ? h(LevelView, { edge: drill, names: levelNames, active: activeLevel,
-          onPick: function (k) { setLevels(function (s) { return (s && s.size === 1 && s.has(k)) ? new Set(levelNames) : new Set([k]); }); } })
-      : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
-          onNode: function (id) { setFilter(function (f) { return (f.observed === id && !f.observer) ? {} : { observed: id }; }); },
-          onEdge: function (e) { setDrill(e); setFilter({ observer: e.observer, observed: e.observed }); setLevels(new Set(levelNames)); } });
+          onPick: function (k) { setLevels(function (s) { return (s && s.size === 1 && s.has(k)) ? allLevels() : new Set([k]); }); } })
+      : isPeer
+        ? h(PeerFocus, { peer: drill.peer, edges: ov.edges,
+            onEdge: function (e) { setDrill({ kind: "edge", from: drill.peer, observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); setFilter({ observer: e.observer, observed: e.observed }); setLevels(allLevels()); } })
+        : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
+            onNode: function (id) { goPeer(id); },
+            onEdge: function (e) { setDrill({ kind: "edge", observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); setFilter({ observer: e.observer, observed: e.observed }); setLevels(allLevels()); } });
+
+    var subtitle = isEdge ? "  · collection → levels" : isPeer ? "  · peer focus · its collections" : "  · observer → observed, weighted by facts";
+    var hint = isEdge ? "Click a level to filter the facts below · back to zoom out"
+      : isPeer ? "Click a collection to open its levels · click the peer crumb or back to zoom out"
+      : "Drag nodes · click a node to explode its collections · click an edge to drill straight to levels";
     var graphCard = h(C.Card, { className: "hm-graph" },
       drill ? null : legend,
       h(C.CardHeader, { style: { paddingBottom: 6 } }, h(C.CardTitle, { style: hdr() }, "Theory-of-Mind Graph",
-        h("span", { className: "hm-muted", style: sub() }, drill ? "  · collection drill-down" : "  · observer → observed, weighted by facts"))),
+        h("span", { className: "hm-muted", style: sub() }, subtitle))),
       h(C.CardContent, null, crumb, graphInner,
-        h("p", { className: "hm-muted", style: { fontSize: 12, margin: "4px 0 0" } },
-          drill ? "Click a level to filter the facts below · toggle it off or hit back to zoom out"
-                : "Drag nodes · click a node for its facts · click an edge to drill into that collection")));
+        h("p", { className: "hm-muted", style: { fontSize: 12, margin: "4px 0 0" } }, hint)));
 
     // fact explorer
     var visibleFacts = facts.items.filter(function (c) { return !levels || levels.has(c.level || "explicit"); });
