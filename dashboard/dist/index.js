@@ -91,6 +91,38 @@
       edgeEls, nodeEls);
   }
 
+  // ---------- drill-down: a collection exploded into its level buckets ----------
+  function LevelView(props) {
+    var edge = props.edge, onPick = props.onPick, active = props.active, names = props.names;
+    var lv = edge.levels || {};
+    var keys = Object.keys(lv);
+    var cx = VBW / 2, cy = VBH / 2, R = Math.min(VBW, VBH) * 0.30;
+    var maxc = Math.max.apply(null, keys.map(function (k) { return lv[k]; }).concat([1]));
+    var spokes = keys.map(function (k, i) {
+      var a = (i / Math.max(keys.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      return { k: k, x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), i: i };
+    });
+    var edgeEls = spokes.map(function (s) {
+      return h("path", { key: "l" + s.i, className: "hm-edge", d: "M" + cx + "," + cy + " L" + s.x + "," + s.y, strokeWidth: 2, style: { cursor: "default" } });
+    });
+    var nodeEls = spokes.map(function (s) {
+      var col = levelColor(s.k, names.indexOf(s.k));
+      var r = 16 + 18 * Math.sqrt(lv[s.k] / maxc);
+      var sel = active === s.k;
+      return h("g", { key: s.k, className: "hm-node" + (sel ? " sel" : ""), transform: "translate(" + s.x + "," + s.y + ")",
+          style: { cursor: "pointer" }, onClick: function () { onPick(s.k); } },
+        h("circle", { r: r, style: { stroke: col, strokeWidth: sel ? 3 : 1.5 } }),
+        h("text", { textAnchor: "middle", dy: -1, fontSize: 12 }, s.k),
+        h("text", { textAnchor: "middle", dy: 14, fontSize: 11, className: "hm-elabel" }, fmt(lv[s.k])));
+    });
+    return h("svg", { viewBox: "0 0 " + VBW + " " + VBH, height: 320, role: "img" },
+      edgeEls, nodeEls,
+      h("g", { transform: "translate(" + cx + "," + cy + ")" },
+        h("circle", { r: 27, style: { fill: "var(--color-muted)", stroke: "var(--color-primary)", strokeWidth: 1.5 } }),
+        h("text", { textAnchor: "middle", dy: -3, fontSize: 11, className: "hm-mono" }, edge.observer),
+        h("text", { textAnchor: "middle", dy: 11, fontSize: 11, className: "hm-mono" }, "→ " + edge.observed)));
+  }
+
   // ---------- small card ----------
   function Card(title, sub, body) {
     var C = SDK.components;
@@ -114,6 +146,7 @@
     var observer = useState(""), setObserver = observer[1]; observer = observer[0];
     var target = useState(""), setTarget = target[1]; target = target[0];
     var busy = useState(false), setBusy = busy[1]; busy = busy[0];
+    var drill = useState(null), setDrill = drill[1]; drill = drill[0]; // null | selected edge/collection
 
     // overview + live poll
     useEffect(function () {
@@ -200,16 +233,28 @@
         h("i", { className: "hm-sw", style: { background: levelColor(lv, i) } }), lv, " ", h("span", { className: "hm-mono" }, fmt(ov.levels[lv])));
     }));
 
-    var graphCard = h(C.Card, { className: "hm-graph" }, legend,
-      h(C.CardHeader, { style: { paddingBottom: 6 } }, h(C.CardTitle, { style: hdr() }, "Theory-of-Mind Graph",
-        h("span", { className: "hm-muted", style: sub() }, "  · observer → observed, weighted by facts"))),
-      h(C.CardContent, null,
-        h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
+    var activeLevel = (levels && levels.size === 1) ? Array.from(levels)[0] : null;
+    var crumb = h("div", { className: "hm-row", style: { marginBottom: 6, fontSize: 12 } },
+      h("a", { style: { cursor: "pointer", color: drill ? "var(--color-primary)" : "var(--color-muted-foreground)" },
+          onClick: function () { setDrill(null); setLevels(new Set(levelNames)); setFilter({}); } }, "All peers"),
+      drill ? h("span", { className: "hm-muted hm-mono", style: { marginLeft: 8 } }, "›  " + drill.observer + " → " + drill.observed) : null,
+      drill && activeLevel ? h("span", { className: "hm-muted hm-mono", style: { marginLeft: 6 } }, "›  " + activeLevel) : null,
+      drill ? h("a", { style: { cursor: "pointer", marginLeft: 12, color: "var(--color-primary)" },
+          onClick: function () { setDrill(null); setLevels(new Set(levelNames)); } }, "← back") : null);
+    var graphInner = drill
+      ? h(LevelView, { edge: drill, names: levelNames, active: activeLevel,
+          onPick: function (k) { setLevels(function (s) { return (s && s.size === 1 && s.has(k)) ? new Set(levelNames) : new Set([k]); }); } })
+      : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
           onNode: function (id) { setFilter(function (f) { return (f.observed === id && !f.observer) ? {} : { observed: id }; }); },
-          onEdge: function (e) { setFilter(function (f) { return (f.observer === e.observer && f.observed === e.observed) ? {} : { observer: e.observer, observed: e.observed }; }); } }),
+          onEdge: function (e) { setDrill(e); setFilter({ observer: e.observer, observed: e.observed }); setLevels(new Set(levelNames)); } });
+    var graphCard = h(C.Card, { className: "hm-graph" },
+      drill ? null : legend,
+      h(C.CardHeader, { style: { paddingBottom: 6 } }, h(C.CardTitle, { style: hdr() }, "Theory-of-Mind Graph",
+        h("span", { className: "hm-muted", style: sub() }, drill ? "  · collection drill-down" : "  · observer → observed, weighted by facts"))),
+      h(C.CardContent, null, crumb, graphInner,
         h("p", { className: "hm-muted", style: { fontSize: 12, margin: "4px 0 0" } },
-          "Drag nodes · click a node to see its facts · click an edge for that collection",
-          (filter.observed || filter.observer) ? h("a", { style: { marginLeft: 8, color: "var(--color-primary)", cursor: "pointer" }, onClick: function () { setFilter({}); } }, "clear filter") : null)));
+          drill ? "Click a level to filter the facts below · toggle it off or hit back to zoom out"
+                : "Drag nodes · click a node for its facts · click an edge to drill into that collection")));
 
     // fact explorer
     var visibleFacts = facts.items.filter(function (c) { return !levels || levels.has(c.level || "explicit"); });
