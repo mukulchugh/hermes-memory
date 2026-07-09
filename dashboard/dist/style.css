@@ -1,0 +1,73 @@
+/* hermes-memory plugin styles. All colors reference the dashboard's --color-*
+   theme tokens so the panel reskins with whatever theme is active. Level colors
+   are supplied inline by the JS (dynamic per level name). */
+
+.hm-wrap { display:flex; flex-direction:column; gap:16px; }
+.hm-mono { font-family: var(--font-mono, ui-monospace, monospace); }
+.hm-muted { color: var(--color-muted-foreground); }
+.hm-row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+.hm-spacer { flex:1; }
+
+/* health strip */
+.hm-health { display:flex; gap:10px; flex-wrap:wrap; }
+.hm-stat { background:var(--color-card); border:1px solid var(--color-border); border-radius:10px; padding:8px 12px; min-width:90px; }
+.hm-stat .n { font-size:18px; font-weight:650; }
+.hm-stat .l { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--color-muted-foreground); }
+
+/* pipeline */
+.hm-pipe { display:flex; align-items:stretch; gap:0; overflow-x:auto; padding-bottom:4px; }
+.hm-stage { flex:1; min-width:128px; background:var(--color-muted); border:1px solid var(--color-border); border-radius:10px; padding:10px 12px; position:relative; }
+.hm-stage + .hm-stage { margin-left:24px; }
+.hm-stage + .hm-stage::before { content:"\2192"; position:absolute; left:-20px; top:50%; transform:translateY(-50%); color:var(--color-primary); opacity:.6; font-size:15px; }
+.hm-stage .s-l { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--color-muted-foreground); }
+.hm-stage .s-n { font-size:19px; font-weight:650; margin-top:2px; }
+.hm-stage .s-t { font-size:11px; margin-top:2px; display:inline-flex; align-items:center; gap:5px; }
+.hm-pulse { width:7px; height:7px; border-radius:50%; background:currentColor; animation:hmpz 1.4s infinite; }
+@keyframes hmpz { 0%,100%{opacity:.35} 50%{opacity:1} }
+.hm-qbar { height:9px; border-radius:6px; background:var(--color-muted); overflow:hidden; border:1px solid var(--color-border); margin-top:8px; }
+.hm-qbar > i { display:block; height:100%; background:linear-gradient(90deg,var(--color-primary),color-mix(in srgb,var(--color-primary) 55%, transparent)); transition:width .4s; }
+
+/* graph */
+.hm-graph { position:relative; }
+.hm-legend { position:absolute; top:10px; right:12px; display:flex; gap:12px; font-size:11px; flex-wrap:wrap; }
+.hm-legend span { display:flex; align-items:center; gap:5px; color:var(--color-muted-foreground); cursor:pointer; }
+.hm-sw { width:9px; height:9px; border-radius:2px; display:inline-block; }
+.hm-graph svg { width:100%; display:block; }
+.hm-graph text { fill: var(--color-card-foreground); font-family: var(--font-mono, monospace); }
+.hm-node circle { fill: var(--color-muted); stroke: var(--color-primary); stroke-width:1.5; cursor:grab; transition:stroke-width .1s; }
+.hm-node circle:hover { stroke-width:3; }
+.hm-node.sel circle { fill: color-mix(in srgb, var(--color-primary) 22%, var(--color-muted)); }
+.hm-edge { stroke: var(--color-primary); opacity:.45; fill:none; cursor:pointer; }
+.hm-edge:hover { opacity:.9; }
+.hm-elabel { fill: var(--color-muted-foreground); font-size:10px; pointer-events:none; }
+
+/* fact explorer */
+.hm-toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+.hm-search { flex:1; min-width:180px; display:flex; align-items:center; gap:8px; background:var(--color-muted); border:1px solid var(--color-border); border-radius:9px; padding:7px 11px; }
+.hm-search input { flex:1; background:none; border:0; outline:none; color:var(--color-card-foreground); font-size:13px; }
+.hm-chip { font-size:12px; padding:5px 10px; border-radius:999px; border:1px solid var(--color-border); background:transparent; color:var(--color-muted-foreground); cursor:pointer; }
+.hm-chip.on { color:var(--color-card-foreground); }
+.hm-facts { display:flex; flex-direction:column; gap:8px; max-height:380px; overflow:auto; }
+.hm-fact { display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border:1px solid var(--color-border); border-radius:10px; }
+.hm-fact .rel { font-size:11px; color:var(--color-muted-foreground); white-space:nowrap; }
+.hm-fact .txt { flex:1; font-size:13px; line-height:1.45; }
+.hm-badge { font-size:10px; text-transform:uppercase; letter-spacing:.04em; padding:2px 7px; border-radius:6px; align-self:center; white-space:nowrap; }
+.hm-arrow { color:var(--color-primary); }
+
+/* chat */
+.hm-chat { display:flex; flex-direction:column; gap:9px; max-height:280px; overflow:auto; }
+.hm-msg { padding:9px 12px; border-radius:12px; font-size:13px; max-width:90%; line-height:1.45; white-space:pre-wrap; }
+.hm-msg.me { align-self:flex-end; background:var(--color-primary); color:var(--color-primary-foreground); }
+.hm-msg.bot { align-self:flex-start; background:var(--color-muted); border:1px solid var(--color-border); }
+.hm-composer { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+.hm-composer select, .hm-composer input { background:var(--color-muted); border:1px solid var(--color-border); border-radius:9px; padding:8px 10px; color:var(--color-card-foreground); outline:none; font-size:13px; }
+.hm-composer input { flex:1; min-width:140px; }
+.hm-btn { background:var(--color-primary); color:var(--color-primary-foreground); border:0; border-radius:9px; padding:8px 14px; font-weight:600; font-size:13px; cursor:pointer; }
+.hm-btn:disabled { opacity:.5; cursor:default; }
+.hm-btn.ghost { background:transparent; color:var(--color-primary); border:1px solid var(--color-border); }
+
+/* dream */
+.hm-tl { display:flex; gap:12px; padding:9px 0 9px 16px; border-left:2px solid var(--color-border); margin-left:6px; position:relative; }
+.hm-tl::before { content:""; position:absolute; left:-6px; top:13px; width:10px; height:10px; border-radius:50%; background:var(--color-primary); }
+.hm-tl .when { font-size:11px; color:var(--color-muted-foreground); white-space:nowrap; min-width:64px; }
+.hm-err { color:var(--color-destructive, #ff6b6b); font-size:12px; }

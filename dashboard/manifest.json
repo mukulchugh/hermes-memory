@@ -1,0 +1,11 @@
+{
+  "name": "hermes-memory",
+  "label": "Memory",
+  "description": "Live visualization of the Honcho theory-of-mind memory: peer graph, fact explorer, dialectic chat, dream timeline, and the deriver pipeline. Fully dynamic — discovers peers, levels, and volume at runtime.",
+  "icon": "Database",
+  "version": "0.1.0",
+  "tab": { "path": "/memory", "position": "after:skills" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
