@@ -8,12 +8,17 @@ dashboard puts behind its own session auth. Nothing here mutates memory except
 the two explicitly user-triggered POSTs (chat, schedule_dream).
 
 Fully dynamic: peers, levels, collections, and counts are all discovered from
-Honcho at runtime by paging conclusions and aggregating in Python. No hardcoded
-peer names, level names, or workspace assumptions (workspace defaults to the
-Hermes memory workspace but is overridable per request or via env).
+Honcho at runtime. No hardcoded peer names, level names, or workspace assumptions
+(workspace defaults to the Hermes memory workspace but is overridable per request
+or via env).
+
+Aggregation uses a direct read-only Postgres GROUP BY when HONCHO_DB_URL is set
+(~90ms), and falls back to paging the Honcho HTTP API and aggregating in Python
+when it isn't. Credentials come from env only and are never committed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -27,8 +32,13 @@ router = APIRouter()
 
 BASE = os.environ.get("HONCHO_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_WS = os.environ.get("HONCHO_WORKSPACE", "hermes")
+# Fast path: aggregate straight from Honcho's Postgres in one GROUP BY (~90ms)
+# instead of paging ~123k rows over HTTP (~120s — Honcho caps page size at 100).
+# Read-only, localhost only, credentials via env only (never committed). If unset
+# or the DB is unreachable, everything falls back to the HTTP paging path below.
+_DB_URL = os.environ.get("HONCHO_DB_URL")
 _PAGE_SIZE = 100
-_CACHE_TTL = 900  # warmer keeps it hot; see background thread below
+_CACHE_TTL = 900  # used only by the HTTP paging fallback
 
 # ws -> (fetched_at, [conclusion, ...])
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -72,17 +82,44 @@ def _all_conclusions(ws: str, force: bool = False) -> list[dict[str, Any]]:
     return items
 
 
-@router.get("/overview")
-def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
-    """Everything the panel needs on load: peers (with fact counts), the
-    observer->observed edge set, level distribution, totals, queue status."""
-    try:
-        peers = _req("POST", f"/v3/workspaces/{ws}/peers/list",
-                     params={"size": 200}, body={}).get("items", [])
-    except Exception:
-        peers = []
-    cons = _all_conclusions(ws, force=refresh)
+# --- SQL fast path (optional) ------------------------------------------------
+# Honcho stores conclusions in the `documents` table; observer/observed/level are
+# indexed columns. One GROUP BY replaces ~1,230 sequential paged HTTP calls.
 
+async def _sql(query: str, *args, one: bool = False):
+    import asyncpg
+    conn = await asyncpg.connect(_DB_URL, timeout=10)
+    try:
+        return await (conn.fetchval(query, *args) if one else conn.fetch(query, *args))
+    finally:
+        await conn.close()
+
+
+def _agg_sql(ws: str):
+    """(edges, levels, observed_facts, observer_facts, total) via one GROUP BY."""
+    rows = asyncio.run(_sql(
+        "SELECT observer, observed, level, count(*) AS n FROM documents "
+        "WHERE workspace_name=$1 AND deleted_at IS NULL "
+        "GROUP BY observer, observed, level", ws))
+    edges: dict[tuple[str, str], dict[str, int]] = {}
+    levels: dict[str, int] = {}
+    observed_facts: dict[str, int] = {}
+    observer_facts: dict[str, int] = {}
+    total = 0
+    for r in rows:
+        o, d, lv, n = r["observer"], r["observed"], (r["level"] or "explicit"), r["n"]
+        edges.setdefault((o, d), {})
+        edges[(o, d)][lv] = edges[(o, d)].get(lv, 0) + n
+        levels[lv] = levels.get(lv, 0) + n
+        observed_facts[d] = observed_facts.get(d, 0) + n
+        observer_facts[o] = observer_facts.get(o, 0) + n
+        total += n
+    return edges, levels, observed_facts, observer_facts, total
+
+
+def _agg_paged(ws: str, refresh: bool):
+    """Fallback: page every conclusion over HTTP and aggregate in Python."""
+    cons = _all_conclusions(ws, force=refresh)
     edges: dict[tuple[str, str], dict[str, int]] = {}
     levels: dict[str, int] = {}
     observed_facts: dict[str, int] = {}
@@ -96,6 +133,54 @@ def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
         levels[lv] = levels.get(lv, 0) + 1
         observed_facts[d] = observed_facts.get(d, 0) + 1
         observer_facts[o] = observer_facts.get(o, 0) + 1
+    return edges, levels, observed_facts, observer_facts, len(cons)
+
+
+_FACTS_WHERE = (
+    "WHERE workspace_name=$1 AND deleted_at IS NULL "
+    "AND ($2::text IS NULL OR observer=$2) "
+    "AND ($3::text IS NULL OR observed=$3) "
+    "AND ($4::text IS NULL OR level=$4) "
+    "AND ($5::text IS NULL OR content ILIKE '%'||$5||'%')"
+)
+
+
+def _facts_sql(ws, observer, observed, level, q, limit, offset):
+    """(total, items) matching the conclusions/list item shape, via SQL."""
+    total = asyncio.run(_sql(
+        "SELECT count(*) FROM documents " + _FACTS_WHERE,
+        ws, observer, observed, level, q, one=True))
+    rows = asyncio.run(_sql(
+        "SELECT id, content, observer AS observer_id, observed AS observed_id, "
+        "session_name AS session_id, level, created_at FROM documents "
+        + _FACTS_WHERE + " ORDER BY created_at DESC LIMIT $6 OFFSET $7",
+        ws, observer, observed, level, q, limit, offset))
+    items = [{
+        "id": r["id"], "content": r["content"],
+        "observer_id": r["observer_id"], "observed_id": r["observed_id"],
+        "session_id": r["session_id"], "level": r["level"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in rows]
+    return total, items
+
+
+@router.get("/overview")
+def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
+    """Everything the panel needs on load: peers (with fact counts), the
+    observer->observed edge set, level distribution, totals, queue status."""
+    try:
+        peers = _req("POST", f"/v3/workspaces/{ws}/peers/list",
+                     params={"size": 200}, body={}).get("items", [])
+    except Exception:
+        peers = []
+
+    # SQL fast path (~90ms); fall back to HTTP paging (~120s) on any DB trouble.
+    try:
+        if not _DB_URL:
+            raise RuntimeError("no HONCHO_DB_URL")
+        edges, levels, observed_facts, observer_facts, total_facts = _agg_sql(ws)
+    except Exception:
+        edges, levels, observed_facts, observer_facts, total_facts = _agg_paged(ws, refresh)
 
     peer_ids = [p.get("id") for p in peers]
     # include any peer that shows up in facts but not in peers/list (robustness)
@@ -121,7 +206,7 @@ def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
             {"observer": o, "observed": d, "levels": lv, "total": sum(lv.values())}
             for (o, d), lv in edges.items()
         ],
-        "total_facts": len(cons),
+        "total_facts": total_facts,
         "queue": {
             "total": q.get("total_work_units"),
             "completed": q.get("completed_work_units"),
@@ -136,7 +221,16 @@ def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
 def facts(ws: str = Query(DEFAULT_WS), observer: Optional[str] = Query(None),
           observed: Optional[str] = Query(None), level: Optional[str] = Query(None),
           q: Optional[str] = Query(None), limit: int = Query(200), offset: int = Query(0)):
-    """Filtered slice of the cached conclusion set. All filters optional."""
+    """Filtered slice of the conclusion set. All filters optional."""
+    # SQL fast path: filter + paginate server-side.
+    try:
+        if _DB_URL:
+            total, items = _facts_sql(ws, observer, observed, level, (q or None), limit, offset)
+            return {"total": total, "items": items}
+    except Exception:
+        pass
+
+    # Fallback: page everything over HTTP and filter in Python.
     cons = _all_conclusions(ws)
     ql = (q or "").lower().strip()
     out = []
@@ -184,22 +278,3 @@ def chat(payload: dict = Body(...)):
 def schedule_dream(ws: str = Query(DEFAULT_WS)):
     """Ask Honcho to schedule a consolidation dream. User-triggered only."""
     return _req("POST", f"/v3/workspaces/{ws}/schedule_dream", body={})
-
-
-# --- background cache warmer -------------------------------------------------
-# /overview must aggregate every conclusion (~122k rows, ~127s at Honcho size=100
-# cap). Doing that on a page load blows past the browser timeout -> infinite
-# spinner. Instead, page in the background on a timer so requests always hit the
-# warm _cache. ponytail: in-process thread, per worker; fine for a single-worker
-# dashboard. Real fix = a Honcho server-side count endpoint (none today).
-import threading as _threading
-
-def _warm_loop():
-    while True:
-        try:
-            _all_conclusions(DEFAULT_WS, force=True)
-        except Exception:
-            pass
-        time.sleep(600)
-
-_threading.Thread(target=_warm_loop, name="hermes-memory-warm", daemon=True).start()
