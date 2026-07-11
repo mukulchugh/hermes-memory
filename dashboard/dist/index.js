@@ -20,75 +20,115 @@
 
   // ---------- interactive graph ----------
   var VBW = 660, VBH = 340;
-  function Graph(props) {
-    var peers = props.peers, edges = props.edges, filter = props.filter, onNode = props.onNode, onEdge = props.onEdge;
-    var svgRef = useRef(null);
-    var posRef = useRef({});
-    var drag = useRef(null);
-    var tick = useState(0); var setTick = tick[1];
-
-    // (re)seed positions for any new peer on a circle
-    var ids = peers.map(function (p) { return p.id; });
-    var pos = posRef.current;
-    var cx = VBW / 2, cy = VBH / 2, R = Math.min(VBW, VBH) * 0.34;
-    ids.forEach(function (id, i) {
-      if (!pos[id]) {
-        var a = (i / Math.max(ids.length, 1)) * Math.PI * 2 - Math.PI / 2;
-        pos[id] = { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
-      }
-    });
-
-    var maxF = Math.max.apply(null, peers.map(function (p) { return p.observed_facts || 0; }).concat([1]));
-    var maxE = Math.max.apply(null, edges.map(function (e) { return e.total || 0; }).concat([1]));
-    function rad(p) { return 14 + 20 * Math.sqrt((p.observed_facts || 0) / maxF); }
-    function toSvg(e) {
-      var r = svgRef.current.getBoundingClientRect();
-      return { x: (e.clientX - r.left) / r.width * VBW, y: (e.clientY - r.top) / r.height * VBH };
+  // cytoscape loader — vendored UMD served beside this bundle (same origin).
+  var CY_URL = "/dashboard-plugins/hermes-memory/dist/cytoscape.min.js";
+  (function () {
+    var ss = document.getElementsByTagName("script");
+    for (var i = 0; i < ss.length; i++) {
+      var src = ss[i].src || "";
+      if (src.indexOf("hermes-memory") >= 0 && /index\.js/.test(src)) { CY_URL = src.replace(/index\.js(\?.*)?$/, "cytoscape.min.js"); break; }
     }
-    function onDown(id) { return function (e) { drag.current = id; e.preventDefault(); }; }
+  })();
+  var _cyP = null;
+  function loadCy() {
+    if (window.cytoscape) return Promise.resolve(window.cytoscape);
+    if (_cyP) return _cyP;
+    _cyP = new Promise(function (res, rej) {
+      var s = document.createElement("script"); s.src = CY_URL;
+      s.onload = function () { res(window.cytoscape); };
+      s.onerror = function () { rej(new Error("cytoscape failed to load")); };
+      document.head.appendChild(s);
+    });
+    return _cyP;
+  }
+
+  var CY_STYLE = [
+    { selector: "node", style: {
+        "background-color": "data(color)", "width": "data(size)", "height": "data(size)",
+        "label": "data(label)", "color": "#dbeeea", "font-size": 11, "font-weight": 600,
+        "text-valign": "center", "text-halign": "center",
+        "text-outline-color": "#0a0e10", "text-outline-width": 2.5,
+        "border-width": 2, "border-color": "data(color)", "border-opacity": 0.35,
+        "transition-property": "opacity, border-width, border-opacity", "transition-duration": "140ms" } },
+    { selector: "edge", style: {
+        "width": "data(w)", "line-color": "#39494c", "target-arrow-color": "#4a5f62",
+        "target-arrow-shape": "triangle", "arrow-scale": 0.8, "curve-style": "bezier", "opacity": 0.5,
+        "transition-property": "opacity, line-color", "transition-duration": "140ms" } },
+    { selector: ".dim", style: { "opacity": 0.1 } },
+    { selector: "node.hl", style: { "border-width": 4, "border-opacity": 1 } },
+    { selector: "edge.hl", style: { "opacity": 0.95, "line-color": "#6fe3d6", "target-arrow-color": "#6fe3d6" } },
+    { selector: "node.sel", style: { "border-color": "#ffffff", "border-width": 4, "border-opacity": 1 } }
+  ];
+
+  // ---------- interactive node graph (cytoscape, force layout) ----------
+  function CyGraph(props) {
+    var peers = props.peers, edges = props.edges, levelNames = props.levelNames,
+        colorOf = props.levelColor, onSelect = props.onSelect, selected = props.selected;
+    var boxRef = useRef(null), cyRef = useRef(null);
+    var st = useState("loading"); var setSt = st[1]; st = st[0]; // loading | ready | error
+
+    function elements() {
+      // per-peer dominant level, derived from the edges observed on that peer
+      var pl = {};
+      edges.forEach(function (e) { var t = pl[e.observed] || (pl[e.observed] = {}); Object.keys(e.levels || {}).forEach(function (k) { t[k] = (t[k] || 0) + e.levels[k]; }); });
+      function dom(id) { var t = pl[id] || {}, best = "explicit", bv = -1; Object.keys(t).forEach(function (k) { if (t[k] > bv) { bv = t[k]; best = k; } }); return best; }
+      var maxF = Math.max.apply(null, peers.map(function (p) { return p.observed_facts || 0; }).concat([1]));
+      var nodes = peers.map(function (p) {
+        var lvl = dom(p.id);
+        return { data: { id: p.id, label: p.id, facts: p.observed_facts || 0,
+          size: 22 + 52 * Math.sqrt((p.observed_facts || 0) / maxF),
+          color: colorOf(lvl, levelNames.indexOf(lvl)) } };
+      });
+      var maxE = Math.max.apply(null, edges.map(function (e) { return e.total || 0; }).concat([1]));
+      var eels = edges.filter(function (e) { return e.observer !== e.observed; }).map(function (e, i) {
+        return { data: { id: "e" + i, source: e.observer, target: e.observed, total: e.total, w: 1 + 7 * (e.total / maxE) } };
+      });
+      return nodes.concat(eels);
+    }
+
+    // mount once
     useEffect(function () {
-      function mv(e) { if (!drag.current) return; var pt = toSvg(e); pos[drag.current] = pt; setTick(function (t) { return t + 1; }); }
-      function up() { drag.current = null; }
-      window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
-      return function () { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
+      var alive = true;
+      loadCy().then(function (cytoscape) {
+        if (!alive || !boxRef.current) return;
+        var cy = cytoscape({
+          container: boxRef.current, elements: elements(), style: CY_STYLE,
+          layout: { name: "cose", animate: true, animationDuration: 600, padding: 36, nodeRepulsion: function () { return 9000; }, idealEdgeLength: function () { return 95; }, gravity: 0.25, numIter: 1200, fit: true },
+          minZoom: 0.2, maxZoom: 4, wheelSensitivity: 0.25, boxSelectionEnabled: false
+        });
+        cyRef.current = cy;
+        cy.on("mouseover", "node", function (ev) { var nb = ev.target.closedNeighborhood(); cy.elements().addClass("dim"); nb.removeClass("dim"); nb.addClass("hl"); });
+        cy.on("mouseout", "node", function () { cy.elements().removeClass("dim hl"); });
+        cy.on("tap", "node", function (ev) { onSelect && onSelect(ev.target.id()); });
+        cy.on("tap", function (ev) { if (ev.target === cy) onSelect && onSelect(null); });
+        if (alive) setSt("ready");
+      }).catch(function () { if (alive) setSt("error"); });
+      return function () { alive = false; if (cyRef.current) { cyRef.current.destroy(); cyRef.current = null; } };
     }, []);
 
-    var edgeEls = edges.map(function (e, i) {
-      var a = pos[e.observer], b = pos[e.observed];
-      if (!a || !b) return null;
-      var w = 1.3 + 5 * (e.total / maxE);
-      var sel = filter && filter.observer === e.observer && filter.observed === e.observed;
-      var mx, my, path;
-      if (e.observer === e.observed) { // self-loop
-        path = "M" + (a.x - 8) + "," + (a.y - rad({ observed_facts: 0 }) - 4) +
-               " C" + (a.x - 40) + "," + (a.y - 70) + " " + (a.x + 40) + "," + (a.y - 70) + " " + (a.x + 8) + "," + (a.y - rad({ observed_facts: 0 }) - 4);
-        mx = a.x; my = a.y - 60;
-      } else {
-        var midx = (a.x + b.x) / 2, midy = (a.y + b.y) / 2 - 18;
-        path = "M" + a.x + "," + a.y + " Q" + midx + "," + midy + " " + b.x + "," + b.y;
-        mx = midx; my = midy - 2;
-      }
-      return h("g", { key: "e" + i },
-        h("path", { className: "hm-edge", d: path, strokeWidth: w, markerEnd: "url(#hm-arrow)",
-          style: sel ? { opacity: 0.95 } : null, onClick: function () { onEdge(e); } }),
-        h("text", { className: "hm-elabel", x: mx, y: my, textAnchor: "middle" }, fmt(e.total)));
-    });
+    // rebuild only when the graph's shape changes — NOT on every 8s overview poll
+    useEffect(function () {
+      var cy = cyRef.current; if (!cy) return;
+      cy.batch(function () { cy.elements().remove(); cy.add(elements()); });
+      cy.layout({ name: "cose", animate: false, padding: 36, numIter: 800, fit: true }).run();
+    }, [peers.length, edges.length]);
 
-    var nodeEls = peers.map(function (p) {
-      var pt = pos[p.id]; if (!pt) return null;
-      var r = rad(p);
-      var sel = filter && (filter.observed === p.id || filter.observer === p.id);
-      return h("g", { key: p.id, className: "hm-node" + (sel ? " sel" : ""),
-          transform: "translate(" + pt.x + "," + pt.y + ")",
-          onPointerDown: onDown(p.id), onClick: function () { onNode(p.id); } },
-        h("circle", { r: r }),
-        h("text", { textAnchor: "middle", dy: 4, fontSize: Math.max(10, r * 0.42) }, p.id));
-    });
+    // reflect selection coming from elsewhere (e.g. fact explorer)
+    useEffect(function () {
+      var cy = cyRef.current; if (!cy) return;
+      cy.nodes().removeClass("sel");
+      if (selected && cy.getElementById(selected).nonempty()) cy.getElementById(selected).addClass("sel");
+    }, [selected]);
 
-    return h("svg", { ref: svgRef, viewBox: "0 0 " + VBW + " " + VBH, height: 320, role: "img" },
-      h("defs", null, h("marker", { id: "hm-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
-        h("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--color-primary)", opacity: 0.7 }))),
-      edgeEls, nodeEls);
+    function zoomBy(f) { var cy = cyRef.current; if (cy) cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); }
+    return h("div", { className: "hm-cy-wrap" },
+      h("div", { ref: boxRef, className: "hm-cy" }),
+      h("div", { className: "hm-cy-ctrl" },
+        h("button", { title: "zoom in", onClick: function () { zoomBy(1.3); } }, "+"),
+        h("button", { title: "zoom out", onClick: function () { zoomBy(1 / 1.3); } }, "−"),
+        h("button", { title: "fit to view", onClick: function () { var cy = cyRef.current; if (cy) cy.fit(undefined, 40); } }, "fit"),
+        h("button", { title: "re-layout", onClick: function () { var cy = cyRef.current; if (cy) cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: true, padding: 36 }).run(); } }, "↻")),
+      st !== "ready" ? h("div", { className: "hm-cy-load hm-muted" }, st === "error" ? "graph engine failed to load" : "building graph…") : null);
   }
 
   // ---------- drill-down: a collection exploded into its level buckets ----------
@@ -322,22 +362,15 @@
       }) : null,
     ]);
 
-    var levelFacts = facts.items.filter(function (c) { return isLevel && (c.level || "explicit") === drill.level; });
-    var graphInner = isLevel
-      ? h(FactsView, { facts: levelFacts, level: drill.level, selected: fd, color: levelColor(drill.level, levelNames.indexOf(drill.level)), onPick: function (f) { setFd(f); } })
-      : isEdge
-        ? h(LevelView, { edge: drill, names: levelNames, active: null, onPick: function (k) { goLevel(drill, k); } })
-        : isPeer
-          ? h(PeerFocus, { peer: drill.peer, edges: ov.edges, onEdge: function (e) { goEdge({ from: drill.peer, observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); } })
-          : h(Graph, { peers: ov.peers, edges: ov.edges, filter: filter,
-              onNode: function (id) { goPeer(id); },
-              onEdge: function (e) { goEdge({ observer: e.observer, observed: e.observed, levels: e.levels, total: e.total }); } });
+    var graphInner = h(CyGraph, { peers: ov.peers, edges: ov.edges, levelNames: levelNames, levelColor: levelColor,
+      selected: filter.observed || filter.observer || null,
+      onSelect: function (id) { setFd(null); setFilter(id ? { observed: id } : {}); } });
 
     var subtitle = isLevel ? "  · facts in this level" : isEdge ? "  · collection → levels" : isPeer ? "  · peer focus · its collections" : "  · observer → observed, weighted by facts";
     var hint = isLevel ? "Click a fact node to read it · back for the level buckets"
       : isEdge ? "Click a level to explode it into its facts · back to zoom out"
       : isPeer ? "Click a collection to open its levels · crumb or back to zoom out"
-      : "Drag nodes · click a node to explode its collections · click an edge to drill to levels";
+      : "Scroll to zoom · drag to pan · drag a node to move it · hover to focus a neighborhood · click a node to filter the facts below";
     var detail = (isLevel && fd) ? h("div", { style: { marginTop: 10, padding: "10px 12px", border: "1px solid var(--color-border)", borderRadius: 10, background: "var(--color-muted)" } },
       h("div", { className: "hm-mono", style: { fontSize: 11, color: "var(--color-muted-foreground)", marginBottom: 4 } },
         fd.observer_id + " → " + fd.observed_id + " · " + (fd.level || "explicit") + (fd.created_at ? " · " + String(fd.created_at).slice(0, 10) : "")),
