@@ -28,7 +28,7 @@ router = APIRouter()
 BASE = os.environ.get("HONCHO_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_WS = os.environ.get("HONCHO_WORKSPACE", "hermes")
 _PAGE_SIZE = 100
-_CACHE_TTL = 45  # seconds — reflects a live-growing seed without hammering the API
+_CACHE_TTL = 900  # warmer keeps it hot; see background thread below
 
 # ws -> (fetched_at, [conclusion, ...])
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -66,7 +66,7 @@ def _all_conclusions(ws: str, force: bool = False) -> list[dict[str, Any]]:
         if page >= pages or not batch:
             break
         page += 1
-        if page > 1000:  # ponytail: safety cap ~100k facts; lift if memory ever exceeds it
+        if page > 5000:  # ponytail: covers ~500k facts; warmer runs this off-request so extra pages are free
             break
     _cache[ws] = (now, items)
     return items
@@ -184,3 +184,22 @@ def chat(payload: dict = Body(...)):
 def schedule_dream(ws: str = Query(DEFAULT_WS)):
     """Ask Honcho to schedule a consolidation dream. User-triggered only."""
     return _req("POST", f"/v3/workspaces/{ws}/schedule_dream", body={})
+
+
+# --- background cache warmer -------------------------------------------------
+# /overview must aggregate every conclusion (~122k rows, ~127s at Honcho size=100
+# cap). Doing that on a page load blows past the browser timeout -> infinite
+# spinner. Instead, page in the background on a timer so requests always hit the
+# warm _cache. ponytail: in-process thread, per worker; fine for a single-worker
+# dashboard. Real fix = a Honcho server-side count endpoint (none today).
+import threading as _threading
+
+def _warm_loop():
+    while True:
+        try:
+            _all_conclusions(DEFAULT_WS, force=True)
+        except Exception:
+            pass
+        time.sleep(600)
+
+_threading.Thread(target=_warm_loop, name="hermes-memory-warm", daemon=True).start()
