@@ -152,14 +152,27 @@ def _facts_sql(ws, observer, observed, level, q, limit, offset):
         ws, observer, observed, level, q, one=True))
     rows = asyncio.run(_sql(
         "SELECT id, content, observer AS observer_id, observed AS observed_id, "
-        "session_name AS session_id, level, created_at FROM documents "
+        "session_name AS session_id, level, created_at, source_ids FROM documents "
         + _FACTS_WHERE + " ORDER BY created_at DESC LIMIT $6 OFFSET $7",
         ws, observer, observed, level, q, limit, offset))
+
+    def _sids(v):
+        # source_ids is jsonb; asyncpg hands it back as a JSON string.
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                return []
+        return v if isinstance(v, list) else []
+
     items = [{
         "id": r["id"], "content": r["content"],
         "observer_id": r["observer_id"], "observed_id": r["observed_id"],
         "session_id": r["session_id"], "level": r["level"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "source_ids": _sids(r["source_ids"]),
     } for r in rows]
     return total, items
 

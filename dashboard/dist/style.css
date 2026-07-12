@@ -83,3 +83,12 @@
   background: color-mix(in srgb, var(--color-card) 82%, transparent); color: var(--color-foreground);
   font-size: 15px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .hm-cy-ctrl button:hover { border-color: var(--color-primary); color: var(--color-primary); }
+
+/* fullscreen + expanded-fact detail */
+.hm-cy-wrap:fullscreen { background:#080c0e; }
+.hm-cy-wrap:fullscreen .hm-cy { height:100vh; border-radius:0; border:none; }
+.hm-cy-detail { position:absolute; left:12px; right:64px; bottom:12px; max-height:42%; overflow:auto;
+  background:color-mix(in srgb, var(--color-card) 92%, transparent); border:1px solid var(--color-border);
+  border-radius:10px; padding:10px 34px 10px 12px; }
+.hm-cy-detail-x { position:absolute; top:5px; right:7px; width:22px; height:22px; border:none; background:transparent;
+  color:var(--color-muted-foreground); font-size:16px; line-height:1; cursor:pointer; }

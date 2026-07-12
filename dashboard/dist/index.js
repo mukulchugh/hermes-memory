@@ -57,15 +57,20 @@
     { selector: ".dim", style: { "opacity": 0.1 } },
     { selector: "node.hl", style: { "border-width": 4, "border-opacity": 1 } },
     { selector: "edge.hl", style: { "opacity": 0.95, "line-color": "#6fe3d6", "target-arrow-color": "#6fe3d6" } },
-    { selector: "node.sel", style: { "border-color": "#ffffff", "border-width": 4, "border-opacity": 1 } }
+    { selector: "node.sel", style: { "border-color": "#ffffff", "border-width": 4, "border-opacity": 1 } },
+    { selector: "node[?isFact]", style: { "width": "data(size)", "height": "data(size)", "label": "", "border-width": 1, "border-opacity": 0.6 } },
+    { selector: "edge[?fact]", style: { "width": 0.7, "opacity": 0.25, "line-color": "#4a5f62", "target-arrow-shape": "none" } },
+    { selector: "edge[?deriv]", style: { "width": 1.5, "line-style": "dashed", "line-color": "#b98cff", "target-arrow-color": "#b98cff", "target-arrow-shape": "triangle", "arrow-scale": 0.7, "opacity": 0.8 } },
+    { selector: "node.factsel", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } }
   ];
 
   // ---------- interactive node graph (cytoscape, force layout) ----------
   function CyGraph(props) {
     var peers = props.peers, edges = props.edges, levelNames = props.levelNames,
         colorOf = props.levelColor, onSelect = props.onSelect, selected = props.selected;
-    var boxRef = useRef(null), cyRef = useRef(null);
+    var boxRef = useRef(null), cyRef = useRef(null), wrapRef = useRef(null), expRef = useRef({});
     var st = useState("loading"); var setSt = st[1]; st = st[0]; // loading | ready | error
+    var fdet = useState(null); var setFdet = fdet[1]; fdet = fdet[0]; // tapped fact detail
 
     function elements() {
       // per-peer dominant level, derived from the edges observed on that peer
@@ -97,13 +102,50 @@
           minZoom: 0.2, maxZoom: 4, wheelSensitivity: 0.25, boxSelectionEnabled: false
         });
         cyRef.current = cy;
+        // double-click a peer to bloom its facts as child nodes; higher-order
+        // facts link to their source facts (source_ids) — the derivation graph.
+        function toggleExpand(pid) {
+          var exp = expRef.current;
+          if (exp[pid]) { cy.batch(function () { exp[pid].forEach(function (fid) { var el = cy.getElementById(fid); if (el.nonempty()) el.remove(); }); }); delete exp[pid]; return; }
+          fj(API + "/facts?observed=" + encodeURIComponent(pid) + "&limit=120").then(function (r) {
+            var items = (r && r.items) || [], added = [];
+            cy.batch(function () {
+              items.forEach(function (f) {
+                var fid = "f:" + f.id; if (cy.getElementById(fid).nonempty()) return;
+                var lv = f.level || "explicit";
+                cy.add({ group: "nodes", data: { id: fid, isFact: 1, level: lv, size: lv === "explicit" ? 9 : 14,
+                  color: colorOf(lv, levelNames.indexOf(lv)), content: f.content, observer: f.observer_id, observed: f.observed_id } });
+                cy.add({ group: "edges", data: { id: "pe:" + fid, source: pid, target: fid, fact: 1 } });
+                added.push(fid);
+              });
+              items.forEach(function (f) {
+                (f.source_ids || []).forEach(function (sid) {
+                  var sfid = "f:" + sid;
+                  if (cy.getElementById(sfid).nonempty()) { var eid = "de:" + f.id + ":" + sid; if (cy.getElementById(eid).empty()) cy.add({ group: "edges", data: { id: eid, source: "f:" + f.id, target: sfid, deriv: 1 } }); }
+                });
+              });
+            });
+            exp[pid] = added;
+            cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: false, padding: 36 }).run();
+          }).catch(function () {});
+        }
         cy.on("mouseover", "node", function (ev) { var nb = ev.target.closedNeighborhood(); cy.elements().addClass("dim"); nb.removeClass("dim"); nb.addClass("hl"); });
         cy.on("mouseout", "node", function () { cy.elements().removeClass("dim hl"); });
-        cy.on("tap", "node", function (ev) { onSelect && onSelect(ev.target.id()); });
-        cy.on("tap", function (ev) { if (ev.target === cy) onSelect && onSelect(null); });
+        var lastTap = { id: null, t: 0 };
+        cy.on("tap", "node", function (ev) {
+          var n = ev.target, id = n.id();
+          if (n.data("isFact")) { setFdet({ content: n.data("content"), level: n.data("level"), observer: n.data("observer"), observed: n.data("observed") }); cy.nodes().removeClass("factsel"); n.addClass("factsel"); return; }
+          var now = (window.Date && Date.now()) || 0;
+          if (lastTap.id === id && now - lastTap.t < 320) { lastTap = { id: null, t: 0 }; toggleExpand(id); return; }
+          lastTap = { id: id, t: now };
+          onSelect && onSelect(id);
+        });
+        cy.on("tap", function (ev) { if (ev.target === cy) { onSelect && onSelect(null); setFdet(null); cy.nodes().removeClass("factsel"); } });
         if (alive) setSt("ready");
       }).catch(function () { if (alive) setSt("error"); });
-      return function () { alive = false; if (cyRef.current) { cyRef.current.destroy(); cyRef.current = null; } };
+      function onFs() { var cy = cyRef.current; if (cy) window.setTimeout(function () { cy.resize(); cy.fit(undefined, 40); }, 120); }
+      document.addEventListener("fullscreenchange", onFs);
+      return function () { alive = false; document.removeEventListener("fullscreenchange", onFs); if (cyRef.current) { cyRef.current.destroy(); cyRef.current = null; } };
     }, []);
 
     // rebuild only when the graph's shape changes — NOT on every 8s overview poll
@@ -121,13 +163,19 @@
     }, [selected]);
 
     function zoomBy(f) { var cy = cyRef.current; if (cy) cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); }
-    return h("div", { className: "hm-cy-wrap" },
+    function toggleFull() { var el = wrapRef.current; if (!el) return; if (document.fullscreenElement) { document.exitFullscreen && document.exitFullscreen(); } else if (el.requestFullscreen) { el.requestFullscreen(); } else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); } }
+    return h("div", { className: "hm-cy-wrap", ref: wrapRef },
       h("div", { ref: boxRef, className: "hm-cy" }),
       h("div", { className: "hm-cy-ctrl" },
         h("button", { title: "zoom in", onClick: function () { zoomBy(1.3); } }, "+"),
         h("button", { title: "zoom out", onClick: function () { zoomBy(1 / 1.3); } }, "−"),
         h("button", { title: "fit to view", onClick: function () { var cy = cyRef.current; if (cy) cy.fit(undefined, 40); } }, "fit"),
-        h("button", { title: "re-layout", onClick: function () { var cy = cyRef.current; if (cy) cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: true, padding: 36 }).run(); } }, "↻")),
+        h("button", { title: "re-layout", onClick: function () { var cy = cyRef.current; if (cy) cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: true, padding: 36 }).run(); } }, "↻"),
+        h("button", { title: "fullscreen", onClick: toggleFull }, "⛶")),
+      fdet ? h("div", { className: "hm-cy-detail" },
+        h("button", { className: "hm-cy-detail-x", title: "close", onClick: function () { setFdet(null); if (cyRef.current) cyRef.current.nodes().removeClass("factsel"); } }, "×"),
+        h("div", { className: "hm-mono", style: { fontSize: 10, opacity: 0.7, marginBottom: 4 } }, fdet.observer + " → " + fdet.observed + " · " + fdet.level),
+        h("div", { style: { fontSize: 13, lineHeight: 1.45 } }, fdet.content)) : null,
       st !== "ready" ? h("div", { className: "hm-cy-load hm-muted" }, st === "error" ? "graph engine failed to load" : "building graph…") : null);
   }
 
@@ -370,7 +418,7 @@
     var hint = isLevel ? "Click a fact node to read it · back for the level buckets"
       : isEdge ? "Click a level to explode it into its facts · back to zoom out"
       : isPeer ? "Click a collection to open its levels · crumb or back to zoom out"
-      : "Scroll to zoom · drag to pan · drag a node to move it · hover to focus a neighborhood · click a node to filter the facts below";
+      : "Scroll to zoom · drag to pan · hover to focus a neighborhood · click a node to filter facts · double-click a peer to bloom its facts (purple = derivation) · ⛶ fullscreen";
     var detail = (isLevel && fd) ? h("div", { style: { marginTop: 10, padding: "10px 12px", border: "1px solid var(--color-border)", borderRadius: 10, background: "var(--color-muted)" } },
       h("div", { className: "hm-mono", style: { fontSize: 11, color: "var(--color-muted-foreground)", marginBottom: 4 } },
         fd.observer_id + " → " + fd.observed_id + " · " + (fd.level || "explicit") + (fd.created_at ? " · " + String(fd.created_at).slice(0, 10) : "")),
