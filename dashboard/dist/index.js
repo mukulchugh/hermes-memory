@@ -104,29 +104,41 @@
         cyRef.current = cy;
         // double-click a peer to bloom its facts as child nodes; higher-order
         // facts link to their source facts (source_ids) — the derivation graph.
+        function addFactNode(f, added) {
+          var fid = "f:" + f.id; if (cy.getElementById(fid).nonempty()) return;
+          var lv = f.level || "explicit";
+          cy.add({ group: "nodes", data: { id: fid, isFact: 1, level: lv, size: lv === "explicit" ? 9 : 14,
+            color: colorOf(lv, levelNames.indexOf(lv)), content: f.content, observer: f.observer_id, observed: f.observed_id } });
+          added.push(fid);
+        }
         function toggleExpand(pid) {
           var exp = expRef.current;
           if (exp[pid]) { cy.batch(function () { exp[pid].forEach(function (fid) { var el = cy.getElementById(fid); if (el.nonempty()) el.remove(); }); }); delete exp[pid]; return; }
-          fj(API + "/facts?observed=" + encodeURIComponent(pid) + "&limit=120").then(function (r) {
-            var items = (r && r.items) || [], added = [];
-            cy.batch(function () {
-              items.forEach(function (f) {
-                var fid = "f:" + f.id; if (cy.getElementById(fid).nonempty()) return;
-                var lv = f.level || "explicit";
-                cy.add({ group: "nodes", data: { id: fid, isFact: 1, level: lv, size: lv === "explicit" ? 9 : 14,
-                  color: colorOf(lv, levelNames.indexOf(lv)), content: f.content, observer: f.observer_id, observed: f.observed_id } });
-                cy.add({ group: "edges", data: { id: "pe:" + fid, source: pid, target: fid, fact: 1 } });
-                added.push(fid);
-              });
-              items.forEach(function (f) {
-                (f.source_ids || []).forEach(function (sid) {
-                  var sfid = "f:" + sid;
-                  if (cy.getElementById(sfid).nonempty()) { var eid = "de:" + f.id + ":" + sid; if (cy.getElementById(eid).empty()) cy.add({ group: "edges", data: { id: eid, source: "f:" + f.id, target: sfid, deriv: 1 } }); }
+          // higher-order facts first so derivation nodes actually surface
+          fj(API + "/facts?observed=" + encodeURIComponent(pid) + "&order=graph&limit=120").then(function (r) {
+            var items = (r && r.items) || [];
+            // sources referenced by these facts but not yet on the canvas
+            var need = {};
+            items.forEach(function (f) { (f.source_ids || []).forEach(function (sid) { if (cy.getElementById("f:" + sid).empty()) need[sid] = 1; }); });
+            var needIds = Object.keys(need);
+            function finish(sources) {
+              var all = items.concat(sources || []), added = [];
+              cy.batch(function () {
+                all.forEach(function (f) { addFactNode(f, added); });
+                // peer -> its own facts
+                items.forEach(function (f) { var eid = "pe:f:" + f.id; if (cy.getElementById(eid).empty()) cy.add({ group: "edges", data: { id: eid, source: pid, target: "f:" + f.id, fact: 1 } }); });
+                // derivation edges across everything now present
+                all.forEach(function (f) {
+                  (f.source_ids || []).forEach(function (sid) {
+                    if (cy.getElementById("f:" + sid).nonempty()) { var eid = "de:" + f.id + ":" + sid; if (cy.getElementById(eid).empty()) cy.add({ group: "edges", data: { id: eid, source: "f:" + f.id, target: "f:" + sid, deriv: 1 } }); }
+                  });
                 });
               });
-            });
-            exp[pid] = added;
-            cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: false, padding: 36 }).run();
+              exp[pid] = added;
+              cy.layout({ name: "cose", animate: true, animationDuration: 500, fit: false, padding: 36 }).run();
+            }
+            if (needIds.length) { fj(API + "/facts?ids=" + encodeURIComponent(needIds.join(","))).then(function (rr) { finish((rr && rr.items) || []); }).catch(function () { finish([]); }); }
+            else { finish([]); }
           }).catch(function () {});
         }
         cy.on("mouseover", "node", function (ev) { var nb = ev.target.closedNeighborhood(); cy.elements().addClass("dim"); nb.removeClass("dim"); nb.addClass("hl"); });

@@ -136,6 +136,32 @@ def _agg_paged(ws: str, refresh: bool):
     return edges, levels, observed_facts, observer_facts, len(cons)
 
 
+def _sids(v):
+    # source_ids is jsonb; asyncpg hands it back as a JSON string.
+    if v is None:
+        return []
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return []
+    return v if isinstance(v, list) else []
+
+
+def _row_to_item(r):
+    return {
+        "id": r["id"], "content": r["content"],
+        "observer_id": r["observer_id"], "observed_id": r["observed_id"],
+        "session_id": r["session_id"], "level": r["level"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "source_ids": _sids(r["source_ids"]),
+    }
+
+
+_FACT_COLS = (
+    "SELECT id, content, observer AS observer_id, observed AS observed_id, "
+    "session_name AS session_id, level, created_at, source_ids FROM documents "
+)
 _FACTS_WHERE = (
     "WHERE workspace_name=$1 AND deleted_at IS NULL "
     "AND ($2::text IS NULL OR observer=$2) "
@@ -145,36 +171,29 @@ _FACTS_WHERE = (
 )
 
 
-def _facts_sql(ws, observer, observed, level, q, limit, offset):
-    """(total, items) matching the conclusions/list item shape, via SQL."""
+def _facts_sql(ws, observer, observed, level, q, limit, offset, order="recent"):
+    """(total, items) via SQL. order='graph' surfaces higher-order (non-explicit)
+    facts first so a graph expand shows the derivation nodes; default is newest."""
     total = asyncio.run(_sql(
         "SELECT count(*) FROM documents " + _FACTS_WHERE,
         ws, observer, observed, level, q, one=True))
+    order_by = ("(level = 'explicit'), created_at DESC" if order == "graph"
+                else "created_at DESC")
     rows = asyncio.run(_sql(
-        "SELECT id, content, observer AS observer_id, observed AS observed_id, "
-        "session_name AS session_id, level, created_at, source_ids FROM documents "
-        + _FACTS_WHERE + " ORDER BY created_at DESC LIMIT $6 OFFSET $7",
+        _FACT_COLS + _FACTS_WHERE + " ORDER BY " + order_by + " LIMIT $6 OFFSET $7",
         ws, observer, observed, level, q, limit, offset))
+    return total, [_row_to_item(r) for r in rows]
 
-    def _sids(v):
-        # source_ids is jsonb; asyncpg hands it back as a JSON string.
-        if v is None:
-            return []
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except Exception:
-                return []
-        return v if isinstance(v, list) else []
 
-    items = [{
-        "id": r["id"], "content": r["content"],
-        "observer_id": r["observer_id"], "observed_id": r["observed_id"],
-        "session_id": r["session_id"], "level": r["level"],
-        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-        "source_ids": _sids(r["source_ids"]),
-    } for r in rows]
-    return total, items
+def _facts_by_ids(ws, id_list):
+    """Fetch specific facts by id — used to pull in derivation sources that fall
+    outside a peer's newest-N window so the derivation edges are complete."""
+    if not id_list:
+        return []
+    rows = asyncio.run(_sql(
+        _FACT_COLS + "WHERE workspace_name=$1 AND deleted_at IS NULL AND id = ANY($2::text[])",
+        ws, id_list))
+    return [_row_to_item(r) for r in rows]
 
 
 @router.get("/overview")
@@ -233,12 +252,19 @@ def overview(ws: str = Query(DEFAULT_WS), refresh: bool = Query(False)):
 @router.get("/facts")
 def facts(ws: str = Query(DEFAULT_WS), observer: Optional[str] = Query(None),
           observed: Optional[str] = Query(None), level: Optional[str] = Query(None),
-          q: Optional[str] = Query(None), limit: int = Query(200), offset: int = Query(0)):
-    """Filtered slice of the conclusion set. All filters optional."""
+          q: Optional[str] = Query(None), ids: Optional[str] = Query(None),
+          order: str = Query("recent"), limit: int = Query(200), offset: int = Query(0)):
+    """Filtered slice of the conclusion set. All filters optional. ``ids`` (comma-
+    separated) fetches specific facts by id; ``order='graph'`` surfaces higher-
+    order facts first for graph expansion."""
     # SQL fast path: filter + paginate server-side.
     try:
+        if _DB_URL and ids:
+            id_list = [x for x in ids.split(",") if x][:500]
+            items = _facts_by_ids(ws, id_list)
+            return {"total": len(items), "items": items}
         if _DB_URL:
-            total, items = _facts_sql(ws, observer, observed, level, (q or None), limit, offset)
+            total, items = _facts_sql(ws, observer, observed, level, (q or None), limit, offset, order)
             return {"total": total, "items": items}
     except Exception:
         pass
